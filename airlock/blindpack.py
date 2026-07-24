@@ -21,7 +21,8 @@ import secrets
 from pathlib import Path
 
 BUILDER_VERSION = "agent-airlock-blindpack-v0.1"
-ALLOWED_BLIND_KEYS = {"case_id", "instructions", "options"}
+ALLOWED_BLIND_KEYS = {"case_id", "instructions", "options",
+                       "context", "state", "injected_decision", "rubric"}
 
 
 def _write_json(path: Path, value) -> None:
@@ -39,11 +40,18 @@ def _sha256_file(path: Path) -> str:
 
 
 def build(prereg_path: Path, outputs_paths: dict[str, Path], output: Path,
-          instructions: str) -> dict:
+          instructions: str, case_context=None) -> dict:
+    """``case_context(case_id) -> dict`` optionally supplies the material the
+    reviewer needs to judge (conversation, injected decision, rubric...).
+    Without it the pack has options only — usually NOT evaluable; provide it."""
     prereg = _read_json(prereg_path)
     expected_arms = set(prereg["arm_ids"])
-    if set(outputs_paths) != expected_arms:
-        missing = sorted(expected_arms - set(outputs_paths))
+    actual_arms = set(outputs_paths)
+    if actual_arms != expected_arms:  # exact equality: no missing, no extras
+        missing = sorted(expected_arms - actual_arms)
+        extra = sorted(actual_arms - expected_arms)
+        if extra:
+            raise RuntimeError(f"non-preregistered arms present: {extra}")
         if missing and prereg.get("missing_comparator_policy", "abort") == "abort":
             raise RuntimeError(
                 f"missing comparators {missing} and preregistered policy is abort")
@@ -70,11 +78,16 @@ def build(prereg_path: Path, outputs_paths: dict[str, Path], output: Path,
         labels = [chr(ord("A") + i) for i in range(len(ordered))]
         key["assignments"][cid] = {label: arm_id
                                     for label, (arm_id, _) in zip(labels, ordered)}
-        _write_json(blind_dir / f"{cid}.json", {
+        blind_case = {
             "case_id": cid,
             "instructions": instructions,
             "options": {label: text for label, (_a, text) in zip(labels, ordered)},
-        })
+        }
+        if case_context is not None:
+            context = dict(case_context(cid))
+            assert not (set(context) & set(blind_case)), "context clashes with core keys"
+            blind_case.update(context)
+        _write_json(blind_dir / f"{cid}.json", blind_case)
     _write_json(sealed_dir / "BLIND_KEY.json", key)
     _write_json(sealed_dir / "PACK_INPUTS_RESOLVED.json", {
         "builder_version": BUILDER_VERSION,

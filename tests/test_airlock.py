@@ -202,3 +202,29 @@ def test_blindpack_aborts_on_missing_comparator(tmp_path):
     with pytest.raises(RuntimeError, match="missing comparators"):
         blindpack.build(prereg, {"x": _outputs(tmp_path, "x", "l")},
                         tmp_path / "pack", instructions="i")
+
+
+def test_blindpack_rejects_extra_arm(tmp_path):
+    prereg = tmp_path / "prereg.json"
+    prereg.write_text(json.dumps({"arm_ids": ["x"], "case_ids": ["C1"],
+                                   "missing_comparator_policy": "abort"}),
+                      encoding="utf-8")
+    with pytest.raises(RuntimeError, match="non-preregistered"):
+        blindpack.build(prereg, {"x": _outputs(tmp_path, "x", "l"),
+                                  "sneaky": _outputs(tmp_path, "sneaky", "s")},
+                        tmp_path / "pack", instructions="i")
+
+
+def test_blindpack_case_context_included(tmp_path):
+    prereg = tmp_path / "prereg.json"
+    prereg.write_text(json.dumps({"arm_ids": ["x"], "case_ids": ["C1", "C2"],
+                                   "missing_comparator_policy": "abort"}),
+                      encoding="utf-8")
+    out = tmp_path / "pack"
+    blindpack.build(prereg, {"x": _outputs(tmp_path, "x", "l")}, out,
+                    instructions="i",
+                    case_context=lambda cid: {"context": [f"turn for {cid}"],
+                                               "rubric": {"why": "because"}})
+    doc = json.loads((out / "blind/C1.json").read_text(encoding="utf-8"))
+    assert doc["context"] == ["turn for C1"] and doc["rubric"]["why"] == "because"
+    assert set(doc) <= blindpack.ALLOWED_BLIND_KEYS
