@@ -1,6 +1,7 @@
 """Tests for the five airlock components (offline; jail tests need bwrap)."""
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -228,3 +229,70 @@ def test_blindpack_case_context_included(tmp_path):
     doc = json.loads((out / "blind/C1.json").read_text(encoding="utf-8"))
     assert doc["context"] == ["turn for C1"] and doc["rubric"]["why"] == "because"
     assert set(doc) <= blindpack.ALLOWED_BLIND_KEYS
+
+
+# --- lessons learned in production use (2026-07) -----------------------------
+
+def test_structured_leak_is_caught_in_both_key_orders():
+    """A denyset built only from sorted-keys JSON misses a leak serialized in
+    insertion order — and prompt builders usually emit insertion order."""
+    from airlock.scan import build_denyset, scan
+    secret = {"b": 2, "a": 1}
+    denyset = build_denyset([], [secret])
+    sorted_form = json.dumps(secret, ensure_ascii=False, separators=(",", ":"),
+                             sort_keys=True)
+    insertion_form = json.dumps(secret, ensure_ascii=False, separators=(",", ":"))
+    assert sorted_form != insertion_form
+    assert scan(f"x {sorted_form} y", denyset)
+    assert scan(f"x {insertion_form} y", denyset)
+
+
+def test_authorized_value_is_cleared_in_both_key_orders():
+    from airlock.scan import build_denyset, scan
+    value = {"b": 2, "a": 1}
+    denyset = build_denyset([], [value], authorized_values=[value])
+    both = (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + " " +
+            json.dumps(value, ensure_ascii=False, separators=(",", ":"),
+                       sort_keys=True))
+    assert scan(both, denyset) == []
+
+
+def test_pinned_input_aborts_on_substitution_and_absence(tmp_path):
+    from airlock.transport import verify_pinned_input
+    target = tmp_path / "predictions.json"
+    target.write_text('{"a": 1}', encoding="utf-8")
+    digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    assert verify_pinned_input(target, digest) == digest
+    target.write_text('{"a": 2}', encoding="utf-8")  # substituted after pinning
+    with pytest.raises(RuntimeError, match="pinned digest"):
+        verify_pinned_input(target, digest)
+    with pytest.raises(RuntimeError, match="missing"):
+        verify_pinned_input(tmp_path / "gone.json", digest)
+
+
+def test_opaque_token_is_not_recoverable_from_public_material():
+    """Hashing a label with a published salt is not opacity: the label space
+    is small and enumerable. The HMAC key must be secret."""
+    from airlock.transport import opaque_source_token
+    key = b"k" * 32
+    public_salt = "deadbeef" * 8          # e.g. the published document digest
+    token = opaque_source_token("patient_01", key)
+    for guess_label in ("patient_01", "patient_1", "`patient_01`"):
+        for guess in (
+            hashlib.sha256(f"{public_salt}|{guess_label}".encode()).hexdigest()[:20],
+            hashlib.sha256(guess_label.encode()).hexdigest()[:20],
+        ):
+            assert guess != token
+    assert opaque_source_token("patient_01", key) == token       # stable
+    assert opaque_source_token("patient_02", key) != token       # distinguishes
+    with pytest.raises(ValueError):
+        opaque_source_token("patient_01", b"short")
+
+
+def test_payload_travels_on_stdin_not_argv():
+    """A prompt passed as an argument is readable in /proc/<pid>/cmdline."""
+    from airlock.jail import JailSpec, bwrap_command
+    spec = JailSpec(jail_home=Path("/tmp"), workdir=Path("/tmp"))
+    command = bwrap_command(spec, ["some-agent", "exec", "-"])
+    assert "some-agent" in command
+    assert not any("SECRET-PAYLOAD" in part for part in command)

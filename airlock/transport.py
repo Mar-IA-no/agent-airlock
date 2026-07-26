@@ -17,11 +17,17 @@ module makes that step auditable:
 from __future__ import annotations
 
 import hashlib
+import hashlib
+import hmac
 import json
 from pathlib import Path
 from typing import Any, Callable
 
 TRANSPORT_VERSION = "agent-airlock-transport-v0.1"
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def canonical_json(value: Any) -> str:
@@ -124,3 +130,46 @@ def import_responses(
         document.update(metadata)
     _write_json(output, document)
     return {"imported": len(rows), "correlation": document["correlation"]}
+
+
+def verify_pinned_input(path: Path, expected_sha256: str,
+                        description: str = "pinned input") -> str:
+    """Fail-closed check for an input that a preregistration pinned by hash.
+
+    Field note (earned the hard way): recording the hash of an input in a
+    manifest makes a run *auditable after the fact*, but it does not stop a
+    substitution from happening. If a preregistration pins the material an
+    experiment consumes — a predictions file, a frozen corpus, a comparator's
+    outputs — the producer must **compare and abort before emitting anything**.
+    "Detectable" and "prevented" are different guarantees; choose prevented.
+
+    Raises if the file is missing or its digest differs. Returns the digest.
+    """
+    if not path.is_file():
+        raise RuntimeError(
+            f"{description} missing: {path} — a pinned input is mandatory; "
+            "nothing is emitted without it")
+    actual = _sha256_file(path)
+    if actual != expected_sha256:
+        raise RuntimeError(
+            f"{description} does not match the pinned digest: expected "
+            f"{expected_sha256[:12]}…, got {actual[:12]}… — aborted")
+    return actual
+
+
+def opaque_source_token(label: str, key: bytes, length: int = 20) -> str:
+    """Stable, non-reversible token for a private source label.
+
+    Field note: hashing a label with a *public* salt (the digest of the source
+    document, say) is not opacity. Source labels usually live in a small,
+    guessable universe (``patient_01``, ``session_03_b``…), so anyone holding
+    the published salt recovers them by enumeration. Use an HMAC keyed with a
+    secret that never enters the repository; then equality between records is
+    still verifiable by whoever holds the key, and by nobody else.
+
+    ``key`` must be at least 16 bytes; the caller is responsible for storing
+    it outside the repo (mode 0600) and for failing closed when it is absent.
+    """
+    if len(key) < 16:
+        raise ValueError("HMAC key too short (<16 bytes)")
+    return hmac.new(key, label.encode("utf-8"), hashlib.sha256).hexdigest()[:length]

@@ -41,7 +41,11 @@ def prose_snippets(text: str | None, min_length: int = MIN_PROSE) -> list[str]:
 
 
 def distinctive(value: Any, min_length: int = MIN_DISTINCTIVE) -> str | None:
-    """Serialize a structured value if it is distinctive enough to scan for."""
+    """Serialize a structured value if it is distinctive enough to scan for.
+
+    Returns the sorted-keys form. Prefer :func:`distinctive_forms` for
+    denysets: a leak can arrive in either key order.
+    """
     if value is None:
         return None
     if isinstance(value, str):
@@ -51,6 +55,28 @@ def distinctive(value: Any, min_length: int = MIN_DISTINCTIVE) -> str | None:
     return serialized if len(serialized) >= min_length else None
 
 
+def distinctive_forms(value: Any,
+                      min_length: int = MIN_DISTINCTIVE) -> list[str]:
+    """All serializations a structured leak could plausibly take.
+
+    Field note: scanning only the ``sort_keys=True`` form is a real gap. The
+    code that *builds* prompts usually serializes in **insertion order**, so a
+    leaked dict escapes a sorted-only denyset while looking identical to a
+    human. Cover both.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if len(value) >= min_length else []
+    forms = [
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"),
+                   sort_keys=True),
+        json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+    ]
+    unique = list(dict.fromkeys(f for f in forms if len(f) >= min_length))
+    return unique
+
+
 def build_denyset(
     prose_fields: list[str | None],
     distinctive_values: list[Any],
@@ -58,14 +84,18 @@ def build_denyset(
 ) -> list[str]:
     """Compose a denyset. ``authorized_values`` are removed even if present in
     the other lists (they are legitimate inputs of this arm)."""
-    authorized = {distinctive(v) for v in authorized_values if v is not None}
+    # Authorized values are cleared in BOTH serializations too: otherwise a
+    # legitimate input serialized in insertion order would be flagged.
+    authorized: set[str] = set()
+    for value in authorized_values:
+        authorized.update(distinctive_forms(value))
     deny: list[str] = []
     for text in prose_fields:
         deny.extend(prose_snippets(text))
     for value in distinctive_values:
-        serialized = distinctive(value)
-        if serialized and serialized not in authorized:
-            deny.append(serialized)
+        for form in distinctive_forms(value):
+            if form not in authorized:
+                deny.append(form)
     return [d for d in deny if d]
 
 

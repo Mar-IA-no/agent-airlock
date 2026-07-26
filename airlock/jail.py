@@ -85,9 +85,20 @@ def bwrap_command(spec: JailSpec, argv: list[str]) -> list[str]:
 
 
 def run_in_jail(spec: JailSpec, argv: list[str],
-                timeout: float | None = None) -> subprocess.CompletedProcess:
+                timeout: float | None = None,
+                stdin_payload: str | None = None) -> subprocess.CompletedProcess:
+    """Run ``argv`` inside the jail.
+
+    ``stdin_payload`` feeds the agent through **stdin**, which is where any
+    real payload belongs. A prompt passed as a command-line argument is
+    world-readable in ``/proc/<pid>/cmdline`` for the lifetime of the process:
+    fine for a probe, wrong for a conversation, a document or anything with a
+    subject. Most agent CLIs accept ``-`` (or read stdin when no prompt
+    argument is given) precisely for this.
+    """
     command = bwrap_command(spec, argv)
     return subprocess.run(command, env=allowlisted_env(spec),
+                          input=stdin_payload,
                           capture_output=True, text=True, timeout=timeout)
 
 
